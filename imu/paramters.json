@@ -1,0 +1,6 @@
+config = {
+    "IMU1": "thorax",
+    "IMU2": "abdomen",
+    "IMU3": "reference",
+    "1": "q1",
+}
