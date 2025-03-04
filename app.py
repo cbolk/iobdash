@@ -1,339 +1,216 @@
-import os
-import pathlib
-import pandas as pd
-import numpy as np
-from datetime import datetime, time, timedelta
 import dash
-from dash import dcc
-from dash import html
+from dash import dcc, html, Input, Output, State, dash_table
 import dash_bootstrap_components as dbc
+import plotly.graph_objects as go
+#from dash_bootstrap_templates import load_figure_template
+import pandas as pd
+import plotly.express as px
+import io
+import base64
+import time
+import datetime
+import json
 
-from dash.exceptions import PreventUpdate
-from dash.dependencies import Input, Output, State
-from scipy.stats import rayleigh
-from imu.api import get_imu_data
+from imu.align import convertlogs, align
 
+IMUNAMES = {"01": ["thorax", "tho", "t"], "02" : ["abdomen", "abd", "a"], "03": ["reference", "ref", "r"]}
+HMCOLORS = [[0, " #fdfefe"],[1," #1e8449"]] #red #d82027
 
-GRAPH_INTERVAL = 5000 #milliseconds
-#number of samples to be plotted
-GRAPH_WINDOW = 10
-DATALOSS_WINDOW = 10
-#name of the signal to be plotted
-SIGNAL_PLOT = "01_1" #fB_median_Tot"
+# Initialize Dash app
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
+app.title = "Respiratory Analysis"
 
+#load_figure_template("materia")
 
-dfloss = pd.DataFrame(columns=["fromTH","toTH","rangeTH","fill","empty"])
-
-
-app = dash.Dash(
-    __name__,
-    meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
-)
-app.title = "DASH"
-
-server = app.server
-
-app.layout = html.Div(
-    [
-        # header
-        html.Div(
-            [
-                html.Div(
-                    [
-                        html.H4("IMU READINGS", className="app__header__title"),
-                        html.P(
-                            "This app continually queries three files and displays live charts of collected data.",
-                            className="app__header__title--grey",
-                        ),
-                    ],
-                    className="app__header__desc",
-                ),
-                html.Div(
-                    [
-                        html.A(
-                            html.Button("SOURCE CODE", className="link-button"),
-                            href="https://github.com/plotly/dash-sample-apps/tree/main/apps/dash-wind-streaming",
-                        ),
-                        html.A(
-                            html.Button("ENTERPRISE DEMO", className="link-button"),
-                            href="https://plotly.com/get-demo/",
-                        ),
-                        html.A(
-                            html.Img(
-                                src=app.get_asset_url("dash-logo-new-pass.png"),
-                                className="app__menu__img",
-                            ),
-                            href="https://plotly.com/dash/",
-                        ),
-                    ],
-                    className="app__header__logo",
-                ),
-            ],
-            className="app__header",
+# Layout
+app.layout = html.Div(style={'display': 'flex'}, children=[
+    html.Div(style={'width': '200px', 'padding': '20px', 'borderLeft': '1px solid #ccc'}, children=[
+        dcc.Upload(
+            id='upload-data',
+            children=html.Button('Select Log File'),
+            multiple=False
         ),
-        html.Div(
-            [
-                # wind speed
-                html.Div(
-                    [
-                        html.Div(
-                            [html.H6("VALUE", className="graph__title")]
-                        ),
-                        dcc.Graph(
-                            id="imu-reading",
-                            figure=dict(),
-                        ),
-                        dcc.Interval(
-                            id="imu-reading-update",
-                            interval=int(GRAPH_INTERVAL),
-                            n_intervals=0,
-                        ),
-                    ],
-                    className="two-thirds column imu__reading__container",
-                ),
-                html.Div(
-                    [
-                        # histogram
-                        html.Div(
-                            [
-                                html.Div(
-                                    [
-                                        html.H6(
-                                            "DATA LOSS",
-                                            className="graph__title",
-                                        )
-                                    ]
-                                ),
-                                dcc.Graph(
-                                    id="data-loss",
-                                    config={"displayModeBar": False},
-                                    figure=dict(),
-                                ),
-                            ],
-                            className="graph__container first",
-                        ),
-                    ],
-                    className="one-third column histogram__direction",
-                ),
-            ],
-            className="app__content",
-        ),
-    ],
-    className="app__container",
-)
+        html.Div(id='file-info', style={'marginTop': '10px'})
+    ]),
+    html.Div(style={'flex': '1', 'padding': '20px'}, children=[
+        dcc.Tabs(id="tabs", value='tab1', children=[
+            dcc.Tab(label='File Info', value='tab1'),
+            dcc.Tab(label='Data Acquisition', value='tab2'),
+            dcc.Tab(label='Data Acquisition - HM', value='tab2b'),
+            dcc.Tab(label='Data Acquisition', value='tab2c'),
+            dcc.Tab(label='Data Analysis', value='tab3')
+        ]),
+        html.Div(id='tabs-content', style={'marginTop': '20px'})
+    ]),
+    # dcc.Store stores the intermediate value
+    dcc.Store(id='aligned-df')
+    # ,
+    # dbc.Spinner(
+    #     [
+    #         dcc.Store(id="store"),
+    #         html.Div(id="tab-content", className="p-4"),
+    #     ],
+    #     delay_show=100,
+    # )    
+])
 
-def get_current_time():
-    """ Helper function to get the current time in seconds. """
-
-    dt = datetime.now() - timedelta(seconds=300)
-    return dt.time()
-
-
-def add_dataloss_stats(df, fromTH, toTH, nfills, nempty):
-    #["fromTH","toTH","rangeTH","fill","empty"]
-    df.loc[len(df)] = [fromTH, toTH, str(fromTH) + "-" + str(toTH), nfills, nempty]
-    print(df)
-    return df
-
-
-@app.callback(
-    Output("imu-reading", "figure"), 
-    [Input("imu-reading-update", "n_intervals")]
-)
-def gen_imu_reading(interval):
-    """
-    Generate the imu reading chart.
-
-    :params interval: update the graph based on an interval
-    """
-
-    sel_time = get_current_time()
-    df, fromTH, toTH, nmiss, nempty = get_imu_data(sel_time, GRAPH_WINDOW)
-    add_dataloss_stats(dfloss, fromTH, toTH, nmiss, nempty)
-
-    trace1 = dict(
-        type="scatter",
-        name="q1 thorax",
-        y=df["01_1"],
-        line={"color": "#332288"},
-        hoverinfo="skip",
-        mode="lines",
-    )
-
-    trace2 = dict(
-        type="scatter",
-        name="q2 thorax",
-        y=df["01_2"],
-        line={"color": "#44AA99"},
-        hoverinfo="skip",
-        mode="lines",
-    )
-
-    trace3 = dict(
-        type="scatter",
-        name="q3 thorax",
-        y=df["01_3"],
-        line={"color": "#CC6677"},
-        hoverinfo="skip",
-        mode="lines",
-    )
-
-    trace4 = dict(
-        type="scatter",
-        name="q4 thorax",
-        y=df["01_4"],
-        line={"color": "#DDCC77"},
-        hoverinfo="skip",
-        mode="lines",
-    )
-
-    layout = dict(
-        font={"color": "#000"},
-        height=700,
-        xaxis={
-            "range": [fromTH, toTH],
-            "showline": True,
-            "zeroline": False,
-            "fixedrange": True,
-#            "tickvals": [0, 50, 100, 150, 200],
-#           "ticktext": ["200", "150", "100", "50", "0"],
-            "title": "Counter",
-        },
-        yaxis={
-            "range": [-1, 1],
-            "showgrid": True,
-            "showline": True,
-            "fixedrange": True,
-            "zeroline": False,
-#            "nticks": max(6, round(df["Speed"].iloc[-1] / 10)),
-        },
-    )
-
-    return dict(data=[trace1, trace2, trace3, trace4], layout=layout)
-
-
-@app.callback(
-    Output("data-loss", "figure"),
-    [Input("imu-reading-update", "n_intervals")], 
-    [
-          State("imu-reading", "figure"),
-    ],
-)
-def gen_data_loss(interval, imu_reading_figure):
-    """
-    Generate data loss chart.
-    :params interval: update the graph based on an interval
-    """
-
-    dfloss.tail(DATALOSS_WINDOW)
-
-    traceFill = dict(
-        type="bar",
-        name="Single IMU data loss",
-        y=dfloss["fill"],
-        line={"color": "Orange"},
-        hoverinfo="skip",
-        opacity=0.4,
-    )
-
-    traceEmpty = dict(
-        type="bar",
-        name="IMUs data loss",
-        y=dfloss["empty"],
-        line={"color": "#EF3E42"},
-        hoverinfo="skip",
-        opacity=0.4,
-    )
-
-    layout = dict(
-        height=350,
-        font={"color": "#000"},
-        barmode="stack",
-        autosize=False,
-        showlegend=False,
-    )
-
-    return dict(data=[traceFill, traceEmpty], layout=layout)
+def parse_content(contents, filename, last_modified):
+    content_type, content_string = contents.split(',')
+    decoded = base64.b64decode(content_string)
+    try:
+        if filename.endswith('.csv'):
+            df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
+        elif filename.endswith('.txt'):
+            payloads = convertlogs(decoded.decode('utf-8'), 3)
+            df, nfill, nempty, nall, time_diff = align(payloads, 3)
+        else:
+            return html.Div("Unsupported file format"), None
+        
+        # # Create an HTML table preview
+        # table = html.Table([
+        #     html.Thead(html.Tr([html.Th(col) for col in df.columns])),
+        #     html.Tbody([
+        #         html.Tr([html.Td(df.iloc[i][col]) for col in df.columns]) for i in range(min(len(df), 5))
+        #     ])
+        # ])
+        
+        return html.Div([
+            html.H5(filename)#,
+            #table
+        ]), df
+    except Exception as e:
+        return html.Div(f"Error processing file: {str(e)}"), None
 
 
 # @app.callback(
-#      Output("data-loss", "figure"),
-#      [Input("imu-reading-update", "n_intervals")],
-#      [
-#          State("imu-reading", "figure"),
-#      ],
+#     Output('aligned-df', 'data'), 
+#     Input('upload-data', 'contents'),
+#     State('upload-data', 'filename')
 # )
-def gen_data_loss_b(interval, imu_reading_figure):
-    """
-    Genererate wind histogram graph.
+# def clean_data(contents, filename):
+#     df = parsedata(contents, filename)
+#     # more generally, this line would be
+#     # json.dumps(cleaned_df)
+#     return json.dumps(df)
 
-    :params interval: update the graph based on an interval
-    :params wind_speed_figure: current wind speed graph
-    """
+@app.callback(
+    [Output('tabs-content', 'children'), 
+     Output('file-info', 'children')],
+    [Input('upload-data', 'contents')],
+    [State('upload-data', 'filename'),
+     State('upload-data', 'last_modified')]
+)
+def update_output(contents, filename, last_modified):
+    print("update_output @" + time.strftime("%H:%M:%S", time.localtime()))
+    if filename is None:
+        return html.Div("Upload a file to get started."), "No file uploaded"
+    file_info, df = parse_content(contents, filename, last_modified)
+    if df is None:
+        return file_info, "Error loading file"
+    
+    file_details = html.Div([
+        html.P([html.B("Filename:"), f" {filename}"])
+    ])
+    
+    return html.Div(id='tab-content', children=[]), file_details
 
+@app.callback(
+    Output('tab-content', 'children'),
+    [Input('tabs', 'value')],
+    [State('upload-data', 'contents'), 
+    State('upload-data', 'filename'),
+    State('upload-data', 'last_updated')]
+)
+def render_tab(tab, contents, filename, last_updated):
+    print("render_tab @" + time.strftime("%H:%M:%S", time.localtime()))
+    if contents is None:
+        return html.Div("Upload a file to see content.")
+    _, df = parse_content(contents, filename, last_updated)
+    if df is None and filename is not None:
+        return html.Div("Error loading data.")
+    
+    if tab == 'tab1':
+        return html.Div([
+            html.H3("File Details"),
+            html.P([html.B("Filename:"), f" {filename}"]),
+            #datetime.datetime.fromtimestamp(last_updated).strftime("%d %m % %Y at %H:%M:%S")
+        ])
+    
+    elif tab == 'tab2':
+        charts = []
+        num_charts = 3  # Ensure we have enough columns
+        for i in range(0, num_charts):
+            fig = px.line(df, 
+                x=df.columns[0], 
+                y=df.columns[4+5*i:8+5*i], 
+                title="IMU " + IMUNAMES[str(i+1).zfill(2)][0]
+            )
+            charts.append(dcc.Graph(figure=fig))
+        
+        return html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr', 'gap': '20px'}, children=charts)
 
-    trace = dict(
-        type="bar",
-        x=bin_val[1],
-        y=bin_val[0],
-        marker={"color": "Orange"},
-        showlegend=False,
-        hoverinfo="x+y",
-    )
+    elif tab == 'tab2b':
+        charts = []
+        # num_charts = 3  # Ensure we have enough columns
+        # for i in range(0, num_charts):
+        #     fig = go.Figure()
+        #     for t in range(0, 4):
+        #         fig.add_trace(go.Scatter(
+        #             x=df[df.columns[0]], 
+        #             y=df[df.columns[4+5*i+t]], 
+        #             mode='lines', 
+        #             name="q" + str(t+1)))
+        #     fig.update_layout(title="IMU " + IMUNAMES[str(i+1).zfill(2)])
+        #     charts.append(dcc.Graph(figure=fig))
+        
+        df["01"] = df["01_1"].notna().astype(int)
+        df["02"] = df["02_1"].notna().astype(int)
+        df["03"] = df["03_1"].notna().astype(int)
+        dfhm = df[["TSTAMP","01","02","03"]]
+#        fig = px.imshow(dfhm, x=dfhm.columns, y=dfhm.index)
 
-    layout = dict(
-        height=350,
-        font={"color": "#000"},
-        xaxis={
-            "title": "Wind Speed (mph)",
-            "showgrid": False,
-            "showline": False,
-            "fixedrange": True,
-        },
-        yaxis={
-            "showgrid": False,
-            "showline": False,
-            "zeroline": False,
-            "title": "Number of Samples",
-            "fixedrange": True,
-        },
-        autosize=True,
-        bargap=0.01,
-        bargroupgap=0,
-        hovermode="closest",
-        legend={
-            "orientation": "h",
-            "yanchor": "bottom",
-            "xanchor": "center",
-            "y": 1,
-            "x": 0.5,
-        },
-        shapes=[
-            {
-                "xref": "x",
-                "yref": "y",
-                "y1": int(max(bin_val_max, y_val_max)) + 0.5,
-                "y0": 0,
-                "x0": avg_val,
-                "x1": avg_val,
-                "type": "line",
-                "line": {"dash": "dash", "color": "#2E5266", "width": 5},
-            },
-            {
-                "xref": "x",
-                "yref": "y",
-                "y1": int(max(bin_val_max, y_val_max)) + 0.5,
-                "y0": 0,
-                "x0": median_val,
-                "x1": median_val,
-                "type": "line",
-                "line": {"dash": "dot", "color": "#BD9391", "width": 5},
-            },
-        ],
-    )
-    return dict(data=[trace, scatter_data[0], scatter_data[1], trace3], layout=layout)
+        fig = go.Figure(data=go.Heatmap(
+                z=dfhm.iloc[:,1:].T.values,
+                x=dfhm.index, #[x[6:] for x in dfhm.iloc[:,1].values], # dfhm.iloc[:,0].str()[6:].values,
+                y=[x[0].title() for x in IMUNAMES.values()],
+                colorscale=HMCOLORS,
+                colorbar=dict(title="Collected sample", tickvals=[0,0.5], ticktext=["Missing", "OK"])))
 
+        fig.update_layout(
+            title=dict(text='Data Acquisition Information'),
+            xaxis_nticks=36)
+        charts.append(dcc.Graph(figure=fig))
+        return html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr', 'gap': '20px'}, children=charts)
 
+    elif tab == 'tab2c':
+        charts = []
+        num_charts = 3  # Ensure we have enough columns
+        fig = go.Figure()
+        for i in range(0, num_charts):
+            for t in range(0, 4):
+                fig.add_trace(go.Scatter(
+                    x=df[df.columns[0]], 
+                    y=df[df.columns[4+5*i+t]] + 3*i, 
+                    mode='lines', 
+                    name="q" + str(t+1) + "_" + IMUNAMES[str(i+1).zfill(2)][2]))
+        fig.update_layout(title="IMU")
+        charts.append(dcc.Graph(figure=fig))
+        
+        return html.Div(style={'display': 'grid', 'gridTemplateColumns': '1fr', 'gap': '20px'}, children=charts)
+    
+    elif tab == 'tab3':
+        return html.Div([
+            html.Button("Run Analysis", id="run-analysis"),
+            html.Div(id="analysis-output")
+        ])
 
-if __name__ == "__main__":
+@app.callback(
+    Output("analysis-output", "children"),
+    Input("run-analysis", "n_clicks"),
+    prevent_initial_call=True
+)
+def run_analysis(n_clicks):
+    return html.Div("Analysis completed!")
+
+if __name__ == '__main__':
     app.run_server(debug=True)
