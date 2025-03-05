@@ -91,7 +91,6 @@ def align(payloads, num_imus):
     nfill = 0
     nmisscounter = 0
     # while you have data in one of the num_imus queues
-#    print("... aligning samples")
     df = pd.DataFrame(columns=cnames)
     idxs = [0]*num_imus
     ns = 0
@@ -126,20 +125,18 @@ def align(payloads, num_imus):
     lastTS = minTS[6:]
     start_time = datetime.strptime(firstTS, TIME_FORMAT)
     end_time = datetime.strptime(lastTS, TIME_FORMAT)
-    time_diff = end_time - start_time
-    return df, nfill, nmiss, ns, time_diff
+    delta = end_time - start_time
+    deltasec = delta.total_seconds()
+    return df, nfill, nmiss, ns, deltasec
 
 
-def loaddata_convert(fnamein, num_imus):
+def loaddata_convert(fnamein):
 #   print("... loading data ")
    fin = open(fnamein, "r")
    txt = fin.read().strip().split("\n")
    fin.close()
 
-   datain = {}
-   for i in range(num_imus):
-       datain[i+1] = []
-       
+
    i = 0
    nlines = len(txt)
    while i < nlines:
@@ -148,13 +145,10 @@ def loaddata_convert(fnamein, num_imus):
              break
       i += 1
    
-   #line = txt[i]
-   #data line, possibly the one with ID 04
-   #if line[0:4] in DISCARD:
-   #   i += 1      
+   datain = {}
+   ns = 0
    firstDataRow = i
    firstReading = txt[i]
-   firstTS = firstReading.strip().split(SEP)[-1]
    #normal data lines
    while i < nlines:
       line = txt[i]
@@ -169,6 +163,7 @@ def loaddata_convert(fnamein, num_imus):
           payload = []
           for bp in range(BYTE_PAYLOAD_START, BYTE_PAYLOAD_END+1):
               payload.append(quatconvert(int(items[bp], 16)))
+              ns += 1
           ts = items[BYTE_TIMESTAMP]
           row = [ts, counter, battery]
           row.extend(payload)
@@ -177,55 +172,25 @@ def loaddata_convert(fnamein, num_imus):
           else:
              datain[imuid] = [row]
       i += 1
+   return datain, ns
 
-   lastTS = ts
-   return datain
-
-def convertlogs(loadedtext, num_imus):
-   txt = loadedtext.strip().split("\n")
-   datain = {}
-   for i in range(num_imus):
-       datain[i+1] = []
-       
-   i = 0
-   nlines = len(txt)
-   while i < nlines:
-      if len(txt[i]) > 0:
-         if txt[i][0] == DATALINE:
-             break
-      i += 1
-   
-   #line = txt[i]
-   #data line, possibly the one with ID 04
-   #if line[0:4] in DISCARD:
-   #   i += 1      
-   firstDataRow = i
-   firstReading = txt[i]
-   firstTS = firstReading.strip().split(SEP)[-1]
-   #normal data lines
-   while i < nlines:
-      line = txt[i]
-      line = line.replace("[", "").replace("]", "")
-      items = line.split(SEP)
-      # ["IMUID", "BATTERY","CHECK","NTH","1","2","3","4","TSTAMP"]
-      row = []
-      if items[BYTE_CHECK] != BLANK:
-          imuid = int(items[BYTE_IMUID], 16)
-          battery = int(items[BYTE_BATTERY], 16)
-          counter = int(items[BYTE_COUNTER], 16)
-          payload = []
-          for bp in range(BYTE_PAYLOAD_START, BYTE_PAYLOAD_END+1):
-              payload.append(quatconvert(int(items[bp], 16)))
-          ts = items[BYTE_TIMESTAMP]
-          row = [ts, counter, battery]
-          row.extend(payload)
-          if imuid in datain:
-             datain[imuid].append(row)
-          else:
-             datain[imuid] = [row]
-      i += 1
-
-   lastTS = ts
-   return datain
-
-
+if len(sys.argv) == 4:
+    try:
+        fname = sys.argv[1]
+        nimus = int(sys.argv[2])
+        fnameout = sys.argv[3]
+        print("Loading data and converting")
+        payloads, nsamples = loaddata_convert(fname)
+        print(nsamples, "records loaded")
+        print("Trying to align data")
+        df, nfill, nmiss, ns, timediff = align(payloads, nimus)
+        df.to_csv(fnameout) 
+        print("Aligned data saved in file ", fnameout)
+        print("Time window:\t\t\t\t", "{:0>8}".format(str(timedelta(seconds=timediff)))) 
+        print("Number of data instants:\t\t", ns)
+        print("Number of missing single imu samples:\t", nfill, "({:.2f}%)".format(100*nfill/(ns*nimus)))
+        print("Number of all imus samples:\t\t", nmiss, "({:.2f}%)".format(100*nmiss/(ns*nimus)))
+    except FileNotFoundError:
+        print("Problems accessing file ", fname)
+else:
+    print("Usage:", sys.argv[0], "input_filename number_of_imus output_filename")
