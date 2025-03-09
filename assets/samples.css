@@ -1,0 +1,39 @@
+.boxmissing {
+    height: 2rem;
+    width: 4rem;
+    padding: 1rem 4rem 1rem 4rem;
+    margin-right: 2px;
+    background-color: #f9f9f9;
+    display: inline-block;
+    flex-direction: row;
+    align-items: center;
+    border: 1px solid black;
+}
+
+.boxcollected {
+    height: 2rem;
+    width: 4rem;
+    margin-right: 2px;
+    padding: 1rem 4rem 1rem 4rem;
+    background-color: #1e8449;
+    display: inline-block;
+    flex-direction: row;
+    align-items: center;
+    border: 1px solid black;
+}
+
+.boxnumber {
+    width: 12rem;
+    padding: 1rem 4rem 1rem 4rem;
+    display: inline-block;
+    flex-direction: row;
+    text-align: right;
+}
+
+.boxlegenda {
+    width: 25rem;
+    padding: 1rem 4rem 1rem 4rem;
+    display: inline-block;
+    flex-direction: row;
+    align-items: center;
+}

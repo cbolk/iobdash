@@ -90,6 +90,7 @@ def align(payloads, num_imus):
     nmiss = 0
     nfill = 0
     nmisscounter = 0
+    noutof = [0]*num_imus
     # while you have data in one of the num_imus queues
 #    print("... aligning samples")
     df = pd.DataFrame(columns=cnames)
@@ -120,6 +121,7 @@ def align(payloads, num_imus):
             finalrow = [np.nan]*(nFields-2)
             finalrow.insert(0, nth)
             finalrow.insert(0, 0)
+        noutof[num_imus-countensamp] += 1
         df.loc[ns] = finalrow
         counter += 1
         ns += 1
@@ -127,7 +129,7 @@ def align(payloads, num_imus):
     start_time = datetime.strptime(firstTS, TIME_FORMAT)
     end_time = datetime.strptime(lastTS, TIME_FORMAT)
     time_diff = end_time - start_time
-    return df, nfill, nmiss, ns, time_diff
+    return df, noutof, ns, time_diff
 
 
 def loaddata_convert(fnamein, num_imus):
